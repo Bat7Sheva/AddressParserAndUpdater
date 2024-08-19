@@ -16,7 +16,7 @@ namespace AddressParserAndUpdater
         public AddressUpdateService()
         {
             // הגדרת מחרוזת החיבור ישירות בקוד
-            connectionString = "Server=stldr095;Database=KADA_Dev_MOD;User Id=KADAUser;Password=123456;";
+            connectionString = "Server=stldr095;Database=Kada-22;User Id=KADAUser;Password=123456;";
         }
 
         public async Task<DataTable> GetAddressesAsync()
@@ -28,7 +28,7 @@ namespace AddressParserAndUpdater
             {
                 string query = @"SELECT TOP 5 [AddressID], [StudentID], [InstitutionID], [SchoolID], [IsMain], [IsMail], [CityID], [StreetID], [HouseNum], [ZipCode], [Neighborhood], [RegionID], [Remark]
                                 FROM [tblAddress]
-                                WHERE Remark IS NOT NULL AND AddressID IN (2436640, 2436645, 2436646, 2436647, 2436648)";
+                                WHERE Remark IS NOT NULL";
                 
 
                 using (SqlDataAdapter adapter = new SqlDataAdapter(query, connection))
