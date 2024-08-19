@@ -3,7 +3,9 @@ using System.Collections.Generic;
 using System.Data;
 using System.Data.SqlClient;
 using System.Linq;
+using System.Net;
 using System.Text;
+using System.Text.Json;
 using System.Text.RegularExpressions;
 using System.Threading.Tasks;
 
@@ -12,6 +14,15 @@ namespace AddressParserAndUpdater
     public class AddressUpdateService
     {
         private readonly string connectionString;
+        public int successfulUpdatesCount = 0;
+        public int noChangesCount = 0;
+        public int parseFailuresCount = 0;
+        public Dictionary<int, string> parseFailureRemarks = new Dictionary<int, string>();
+        private readonly string exportDirectoryPath = "ExportedFiles"; // שם התיקיה שתכיל את הקבצים המיוצאים
+        private readonly string baseFilePath = "ParseSummary.json"; // השם הבסיסי של הקובץ
+
+
+
 
         public AddressUpdateService()
         {
@@ -26,16 +37,19 @@ namespace AddressParserAndUpdater
 
             using (SqlConnection connection = new SqlConnection(connectionString))
             {
-                string query = @"SELECT TOP 5 [AddressID], [StudentID], [InstitutionID], [SchoolID], [IsMain], [IsMail], [CityID], [StreetID], [HouseNum], [ZipCode], [Neighborhood], [RegionID], [Remark]
+                string query = @"SELECT [AddressID], [StudentID], [InstitutionID], [SchoolID], [IsMain], [IsMail], [CityID], [StreetID], [HouseNum], [ZipCode], [Neighborhood], [RegionID], [Remark]
                                 FROM [tblAddress]
-                                WHERE Remark IS NOT NULL";
-                
+                                WHERE Remark IS NOT NULL
+                                AND AddressID IN (2436634,2436635,2436636,2436637,2436638,2436639,2436640,2436641,2436642,2436643)";
+
 
                 using (SqlDataAdapter adapter = new SqlDataAdapter(query, connection))
                 {
                     DataTable addresses = new DataTable();
                     await Task.Run(() => adapter.Fill(addresses));
                     Console.WriteLine("Addresses retrieved successfully.");
+                    GreenConsoleColor();
+                    Console.WriteLine($"Found {addresses.Rows.Count} addresses.");
                     ResetConsoleColor();
                     return addresses;
                 }
@@ -63,15 +77,21 @@ namespace AddressParserAndUpdater
             if (string.IsNullOrEmpty(rawAddress)) return;
 
             var (streetName, houseNumber, city, remark) = ParseAddress(rawAddress);
-            Console.WriteLine($"Parsed Address - Street: {streetName}, House Number: {houseNumber}, City: {city}, Remark: {remark}");
+            Console.WriteLine(string.Join(" ",
+                                $"Parsed Address:",
+                                !string.IsNullOrEmpty(streetName) ? $"Street Name: {streetName}" : null,
+                                !string.IsNullOrEmpty(houseNumber) ? $",House Number: {houseNumber}" : null,
+                                !string.IsNullOrEmpty(city) ? $",City: {city}" : null),
+                                !string.IsNullOrEmpty(remark) ? $",Remark: {remark}" : null);
 
             if (string.IsNullOrEmpty(remark))
             {
                 var (streetID, cityID) = await GetStreetAndCityIDAsync(addressRow["CityID"] as int?, city, streetName);
-                Console.WriteLine($"Found StreetID: {streetID}, CityID: {cityID}");
 
                 if (streetID.HasValue)
                 {
+                    Console.WriteLine($"Found StreetID: {streetID}, CityID: {cityID}");
+
                     addressRow["StreetID"] = streetID;
                     addressRow["HouseNum"] = houseNumber;
                     if (addressRow["CityID"] == DBNull.Value && cityID.HasValue)
@@ -135,6 +155,7 @@ namespace AddressParserAndUpdater
 
             RedConsoleColor();
             Console.WriteLine($"Address parsing failed for: {address}");
+            ResetConsoleColor();
             return (null, null, null, address); // אם אין התאמה, החזר את הכתובת כהערה
         }
 
@@ -149,8 +170,8 @@ namespace AddressParserAndUpdater
 
                 // חיפוש רחוב לפי CityID ו-StreetName
                 string streetQuery = @"SELECT [StreetID]
-                                        FROM [sysStreet]
-                                        WHERE [CityID] = @CityID AND [StreetName] = @StreetName";
+                                       FROM [sysStreet]
+                                       WHERE [CityID] = @CityID AND [StreetName] = @StreetName";
 
                 using (SqlCommand streetCommand = new SqlCommand(streetQuery, connection))
                 {
@@ -228,16 +249,25 @@ namespace AddressParserAndUpdater
                                 {
                                     if (await reader.ReadAsync())
                                     {
+                                        /* אם השדות אותו הדבר.. לפני ואחרי. */
                                         if (!Equals(reader["StreetID"], row["StreetID"]) ||
                                             !Equals(reader["HouseNum"], row["HouseNum"]) ||
                                             !Equals(reader["CityID"], row["CityID"]))
                                         {
                                             hasChanges = true;
                                         }
+                                        else if (row["StreetID"] == DBNull.Value)
+                                        {
+                                            parseFailuresCount++;
+                                            parseFailureRemarks[Convert.ToInt32(row["AddressID"])] = row["Remark"].ToString();
+                                            RedConsoleColor();
+                                            Console.WriteLine($"No changes detected for AddressID {row["AddressID"]}, conversion and parsing remark failed! ({row["Remark"]})");
+                                        }
                                         else
                                         {
+                                            noChangesCount++;
                                             RedConsoleColor();
-                                            Console.WriteLine($"No changes detected for AddressID {row["AddressID"]}");
+                                            Console.WriteLine($"No changes detected for AddressID {row["AddressID"]}, there is no changes detected!");
                                         }
                                     }
                                     else
@@ -260,6 +290,7 @@ namespace AddressParserAndUpdater
                                     command.Parameters.AddWithValue("@AddressID", row["AddressID"]);
 
                                     int rowsAffected = await command.ExecuteNonQueryAsync();
+                                    successfulUpdatesCount++;
                                     GreenConsoleColor();
                                     Console.WriteLine($"Updated AddressID {row["AddressID"]}: {rowsAffected} rows affected.");
                                     ResetConsoleColor();
@@ -275,9 +306,85 @@ namespace AddressParserAndUpdater
                 // טיפול בשגיאות
                 RedConsoleColor();
                 Console.WriteLine($"An error occurred: {ex.Message}");
+                ResetConsoleColor();
             }
         }
 
+        public void PrintSummery()
+        {
+            Console.WriteLine();
+            BlueConsoleColor();
+            Console.WriteLine($"Total successful updates: {successfulUpdatesCount}.");
+            Console.WriteLine($"Total addresses with no changes detected: {noChangesCount}.");
+            Console.WriteLine($"Total addresses where conversion and parsing failed: {parseFailuresCount}.");
+
+            ExportParseSummary();
+        }
+
+        // פונקציה עיקרית לייצוא סיכום וכתיבה לקובץ
+        public void ExportParseSummary()
+        {
+            Console.WriteLine();
+            // הדפסת סיכום ל-Log
+
+            try
+            {
+                // יצירת תיקיה לייצוא אם לא קיימת
+                string directory = GetExportDirectory();
+                if (!Directory.Exists(directory))
+                {
+                    Directory.CreateDirectory(directory);
+                }
+
+                // יצירת נתיב קובץ עם תאריך ושעה נוכחיים
+                string filePath = GetFilePathWithDate(directory, baseFilePath);
+
+                // המרת ה- Dictionary ל- JSON וכתיבתו לקובץ
+                string json = JsonSerializer.Serialize(parseFailureRemarks, new JsonSerializerOptions { WriteIndented = true });
+                File.WriteAllText(filePath, json);
+
+                YellowConsoleColor();
+                Console.WriteLine($"Summary of Parsing Failures exported to: {filePath}");
+                ResetConsoleColor();  
+            }
+            catch (Exception ex)
+            {
+                RedConsoleColor();
+                Console.WriteLine("Export failed!");
+                Console.WriteLine($"Error: {ex.Message}");
+                ResetConsoleColor();
+            }
+        }
+
+        // פונקציה ליצירת נתיב קובץ עם תאריך ושעה
+        private string GetFilePathWithDate(string directory, string baseFilePath)
+        {
+            // קבלת התאריך והשעה הנוכחיים בפורמט YYYY-MM-DD_HH-mm-ss
+            string dateTimeStamp = DateTime.Now.ToString("yyyy-MM-dd_HH-mm-ss");
+
+            // יצירת נתיב קובץ חדש עם התאריך והשעה
+            string fileNameWithoutExtension = Path.GetFileNameWithoutExtension(baseFilePath);
+            string extension = Path.GetExtension(baseFilePath);
+
+            string filePath = Path.Combine(directory, $"{fileNameWithoutExtension}_{dateTimeStamp}{extension}");
+
+            return filePath;
+        }
+
+        // פונקציה לקבלת הנתיב של התיקיה שבה נמצא הקובץ של הסרוויס
+        private string GetExportDirectory()
+        {
+            // קבלת נתיב התיקיה של קובץ הסרוויס (קובץ הסרוויס עצמו)
+            string assemblyLocation = typeof(AddressUpdateService).Assembly.Location;
+
+            // קבלת נתיב התיקיה של קובץ הסרוויס, חזרה אחורה לתיקיית הפרויקט
+            string projectDirectory = Path.GetDirectoryName(Path.GetDirectoryName(Path.GetDirectoryName(Path.GetDirectoryName(assemblyLocation))));
+
+            // יצירת נתיב לתיקיה שבה יישמר הקובץ
+            string exportDirectory = Path.Combine(projectDirectory, exportDirectoryPath);
+
+            return exportDirectory;
+        }
 
         public void GreenConsoleColor()
         {
@@ -290,6 +397,10 @@ namespace AddressParserAndUpdater
         public void BlueConsoleColor()
         {
             Console.ForegroundColor = ConsoleColor.Blue;
+        }
+        public void YellowConsoleColor()
+        {
+            Console.ForegroundColor = ConsoleColor.Yellow;
         }
         public void ResetConsoleColor()
         {
