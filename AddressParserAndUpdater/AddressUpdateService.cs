@@ -78,7 +78,6 @@ namespace AddressParserAndUpdater
                 using (SqlCommand command = new SqlCommand(remarkToChangeCountQuery, connection))
                 {
                     int count = (int)await command.ExecuteScalarAsync();
-                    YellowConsoleWriteLine($"Found {count} addresses for update.");
                     return count;
                 }
             }
@@ -98,12 +97,15 @@ namespace AddressParserAndUpdater
             int startIndex = 0;
             DataTable addresses;
 
-            GetRemarkCountAsync();
+            int remarkCount = await GetRemarkCountAsync();
+            Console.WriteLine($"Total remarks to process: {remarkCount}");
 
             do
             {
-                addresses = await GetAddressesAsync(startIndex, 20);
-                //addresses = await GetAddressesAsync(startIndex, BatchSize);
+                //addresses = await GetAddressesAsync(startIndex, 20);
+                addresses = await GetAddressesAsync(startIndex, BatchSize);
+                if (addresses.Rows.Count == 0) break; // Exit loop if no more addresses
+
 
 
                 // עיבוד כתובות במקביל
@@ -120,8 +122,8 @@ namespace AddressParserAndUpdater
 
                 startIndex += BatchSize;
 
-            } while (false); // ממשיך לעבד עד שאין עוד כתובות לעבד
-            //} while (addresses.Rows.Count > 0); // ממשיך לעבד עד שאין עוד כתובות לעבד
+            //} while (false); // ממשיך לעבד עד שאין עוד כתובות לעבד
+            } while (addresses.Rows.Count > 0); // ממשיך לעבד עד שאין עוד כתובות לעבד
 
             // הקלטת זמן סיום
             endTime = DateTime.Now;
@@ -148,13 +150,15 @@ namespace AddressParserAndUpdater
 
                 if (streetID.HasValue)
                 {
-                    //Console.WriteLine($"Found StreetID: {streetID}, CityID: {cityID}");
-
-                    addressRow["StreetID"] = streetID;
-                    addressRow["HouseNum"] = houseNumber;
-                    if (addressRow["CityID"] == DBNull.Value && cityID.HasValue)
+                    // נעילה כדי להבטיח גישה בטוחה לנתונים בזמן מקביליות
+                    lock (addressRow.Table)
                     {
-                        addressRow["CityID"] = cityID;
+                        addressRow["StreetID"] = streetID;
+                        addressRow["HouseNum"] = houseNumber;
+                        if (addressRow["CityID"] == DBNull.Value && cityID.HasValue)
+                        {
+                            addressRow["CityID"] = cityID;
+                        }
                     }
                 }
             }
@@ -224,7 +228,7 @@ namespace AddressParserAndUpdater
             {
                 await connection.OpenAsync();
 
-                // חיפוש רחוב לפי CityID ו-StreetName
+                // Query to find StreetID
                 string streetQuery = @"SELECT [StreetID]
                                        FROM [sysStreet] (NOLOCK)
                                        WHERE [CityID] = @CityID AND [StreetName] = @StreetName";
@@ -241,7 +245,7 @@ namespace AddressParserAndUpdater
                     }
                 }
 
-                // אם לא נמצא רחוב עם ה-CityID הקיים, חפש עיר לפי cityName
+                // If no StreetID found, search for CityID
                 if (!foundStreetID.HasValue && !string.IsNullOrEmpty(cityName))
                 {
                     string cityQuery = @"SELECT [CityID]
@@ -257,7 +261,7 @@ namespace AddressParserAndUpdater
                         {
                             foundCityID = Convert.ToInt32(cityResult);
 
-                            // לאחר שמצאנו CityID חדש, חפש את ה-StreetID מחדש עם ה-CityID החדש
+                            // Search for StreetID again with the new CityID
                             streetQuery = @"SELECT [StreetID]
                                             FROM [sysStreet] (NOLOCK)
                                             WHERE [CityID] = @CityID AND [StreetName] = @StreetName";
@@ -403,8 +407,6 @@ namespace AddressParserAndUpdater
 
                 ParseRemarks.Add("Summary", summary.ToDictionary(kvp => kvp.Key, kvp => kvp.Value.ToString()));
 
-                PrintDictionary(ParseRemarks);
-
                 // המרת ה- Dictionary ל- JSON וכתיבתו לקובץ
                 var options = new JsonSerializerOptions
                 {
@@ -414,7 +416,7 @@ namespace AddressParserAndUpdater
 
                 string json = JsonSerializer.Serialize(ParseRemarks, options);
                 File.WriteAllText(filePath, json);
-                Console.WriteLine(json); // הדפס לקונסול לבדוק את התוכן
+                //Console.WriteLine(json); // הדפס לקונסול לבדוק את התוכן
 
                 YellowConsoleWriteLine($"Summary of Parsing Failures exported to: {filePath}");
             }
@@ -422,19 +424,6 @@ namespace AddressParserAndUpdater
             {
                 RedConsoleWriteLine("Export failed!");
                 RedConsoleWriteLine($"Error: {ex.Message}");
-            }
-        }
-
-        static void PrintDictionary(Dictionary<string, Dictionary<object, string>> dictionary)
-        {
-            foreach (var outerPair in dictionary)
-            {
-                Console.WriteLine($"{outerPair.Key} ({outerPair.Value.Count})");
-                foreach (var innerPair in outerPair.Value)
-                {
-                    Console.WriteLine($"\tAddresID: {innerPair.Key}, Value: {innerPair.Value}");
-                }
-                Console.WriteLine();
             }
         }
 
