@@ -14,62 +14,100 @@ namespace AddressParserAndUpdater
     public class AddressUpdateService
     {
         private readonly string connectionString;
-        public int successfulUpdatesCount = 0;
-        public int noChangesCount = 0;
-        public int parseFailuresCount = 0;
-        public Dictionary<int, string> parseFailureRemarks = new Dictionary<int, string>();
+        private const int BatchSize = 100;
+        public Dictionary<object, string> parseFailureRemarks = new Dictionary<object, string>();
+        public Dictionary<object, string> noChangesParseRemarks = new Dictionary<object, string>();
+        public Dictionary<object, string> successfulParseRemarks = new Dictionary<object, string>();
+        public Dictionary<string, Dictionary<object, string>> ParseRemarks = new Dictionary<string, Dictionary<object, string>>();
         private readonly string exportDirectoryPath = "ExportedFiles"; // שם התיקיה שתכיל את הקבצים המיוצאים
         private readonly string baseFilePath = "ParseSummary.json"; // השם הבסיסי של הקובץ
 
-
-
-
         public AddressUpdateService()
         {
-            // הגדרת מחרוזת החיבור ישירות בקוד
             connectionString = "Server=stldr095;Database=Kada-22;User Id=KADAUser;Password=123456;";
+
+            ParseRemarks.Add("ParseFailureRemarks", parseFailureRemarks);
+            ParseRemarks.Add("NoChangesParseRemarks", noChangesParseRemarks);
+            ParseRemarks.Add("SuccessfulParseRemarks", successfulParseRemarks);
         }
 
-        public async Task<DataTable> GetAddressesAsync()
+        public async Task<DataTable> GetAddressesAsync(int startIndex, int batchSize)
         {
-            BlueConsoleColor();
-            Console.WriteLine("Connecting to the database to get addresses...");
+            BlueConsoleWriteLine("Connecting to the database to get addresses...");
 
             using (SqlConnection connection = new SqlConnection(connectionString))
             {
-                string query = @"SELECT [AddressID], [StudentID], [InstitutionID], [SchoolID], [IsMain], [IsMail], [CityID], [StreetID], [HouseNum], [ZipCode], [Neighborhood], [RegionID], [Remark]
-                                FROM [tblAddress]
-                                WHERE Remark IS NOT NULL
-                                AND AddressID IN (2436634,2436635,2436636,2436637,2436638,2436639,2436640,2436641,2436642,2436643)";
-
+                string query = $@"WITH AddressCTE AS (
+                                      SELECT 
+                                          [AddressID], [StudentID], [InstitutionID], [SchoolID], [IsMain], [IsMail], [CityID], 
+                                          [StreetID], [HouseNum], [ZipCode], [Neighborhood], [RegionID], [Remark],
+                                          ROW_NUMBER() OVER (ORDER BY [AddressID]) AS RowNumber
+                                      FROM [tblAddress] (NOLOCK)
+                                      WHERE Remark IS NOT NULL
+                                  )
+                                  SELECT 
+                                      [AddressID], [StudentID], [InstitutionID], [SchoolID], [IsMain], [IsMail], [CityID], 
+                                      [StreetID], [HouseNum], [ZipCode], [Neighborhood], [RegionID], [Remark]
+                                  FROM AddressCTE
+                                  WHERE RowNumber BETWEEN @StartIndex AND @EndIndex";
 
                 using (SqlDataAdapter adapter = new SqlDataAdapter(query, connection))
                 {
+                    adapter.SelectCommand.Parameters.AddWithValue("@StartIndex", startIndex + 1);
+                    adapter.SelectCommand.Parameters.AddWithValue("@EndIndex", startIndex + batchSize);
+
                     DataTable addresses = new DataTable();
                     await Task.Run(() => adapter.Fill(addresses));
-                    Console.WriteLine("Addresses retrieved successfully.");
-                    GreenConsoleColor();
-                    Console.WriteLine($"Found {addresses.Rows.Count} addresses.");
-                    ResetConsoleColor();
                     return addresses;
                 }
-            }
 
+            }
         }
 
-        public async Task<DataTable> ProcessAddressesAsync()
+        public async Task<int> GetRemarkCountAsync()
         {
-            Console.WriteLine("Processing addresses...");
+            string remarkToChangeCountQuery = @"SELECT COUNT(*)
+                                                FROM [Kada-22].[dbo].[tblAddress] (NOLOCK)
+                                                WHERE Remark IS NOT NULL";
 
-            DataTable addresses = await GetAddressesAsync();
-
-            foreach (DataRow row in addresses.Rows)
+            using (SqlConnection connection = new SqlConnection(connectionString))
             {
-                string rawAddress = row["Remark"].ToString();
-                Console.WriteLine($"Processing address: {rawAddress}");
-                await ProcessAddressAsync(rawAddress, row);
+                await connection.OpenAsync();
+                using (SqlCommand command = new SqlCommand(remarkToChangeCountQuery, connection))
+                {
+                    int count = (int)await command.ExecuteScalarAsync();
+                    YellowConsoleWriteLine($"Found {count} addresses for update.");
+                    return count;
+                }
             }
-            return addresses;
+        }
+
+        public async Task ProcessAddressesInBatchesAsync()
+        {
+            Console.WriteLine("Processing addresses in batches...");
+
+            int startIndex = 0;
+            DataTable addresses;
+
+            GetRemarkCountAsync();
+
+            do
+            {
+                addresses = await GetAddressesAsync(startIndex, BatchSize);
+
+                foreach (DataRow row in addresses.Rows)
+                {
+                    string rawAddress = row["Remark"].ToString();
+                    await ProcessAddressAsync(rawAddress, row);
+                }
+
+                await UpdateAddressesAsync(addresses);
+
+                startIndex += BatchSize;
+
+            } while (addresses.Rows.Count > 0); // ממשיך לעבד עד שאין עוד כתובות לעבד
+
+            PrintSummary();
         }
 
         public async Task ProcessAddressAsync(string rawAddress, DataRow addressRow)
@@ -77,12 +115,7 @@ namespace AddressParserAndUpdater
             if (string.IsNullOrEmpty(rawAddress)) return;
 
             var (streetName, houseNumber, city, remark) = ParseAddress(rawAddress);
-            Console.WriteLine(string.Join(" ",
-                                $"Parsed Address:",
-                                !string.IsNullOrEmpty(streetName) ? $"Street Name: {streetName}" : null,
-                                !string.IsNullOrEmpty(houseNumber) ? $",House Number: {houseNumber}" : null,
-                                !string.IsNullOrEmpty(city) ? $",City: {city}" : null),
-                                !string.IsNullOrEmpty(remark) ? $",Remark: {remark}" : null);
+            Console.WriteLine($"Parsed Address: {streetName} {houseNumber} {city} {remark}");
 
             if (string.IsNullOrEmpty(remark))
             {
@@ -90,7 +123,7 @@ namespace AddressParserAndUpdater
 
                 if (streetID.HasValue)
                 {
-                    Console.WriteLine($"Found StreetID: {streetID}, CityID: {cityID}");
+                    //Console.WriteLine($"Found StreetID: {streetID}, CityID: {cityID}");
 
                     addressRow["StreetID"] = streetID;
                     addressRow["HouseNum"] = houseNumber;
@@ -153,9 +186,7 @@ namespace AddressParserAndUpdater
                 }
             }
 
-            RedConsoleColor();
-            Console.WriteLine($"Address parsing failed for: {address}");
-            ResetConsoleColor();
+            RedConsoleWriteLine($"Address parsing failed for: {address}");
             return (null, null, null, address); // אם אין התאמה, החזר את הכתובת כהערה
         }
 
@@ -170,7 +201,7 @@ namespace AddressParserAndUpdater
 
                 // חיפוש רחוב לפי CityID ו-StreetName
                 string streetQuery = @"SELECT [StreetID]
-                                       FROM [sysStreet]
+                                       FROM [sysStreet] (NOLOCK)
                                        WHERE [CityID] = @CityID AND [StreetName] = @StreetName";
 
                 using (SqlCommand streetCommand = new SqlCommand(streetQuery, connection))
@@ -189,7 +220,7 @@ namespace AddressParserAndUpdater
                 if (!foundStreetID.HasValue && !string.IsNullOrEmpty(cityName))
                 {
                     string cityQuery = @"SELECT [CityID]
-                                         FROM [sysCity]
+                                         FROM [sysCity] (NOLOCK)
                                          WHERE [CityName] = @CityName";
 
                     using (SqlCommand cityCommand = new SqlCommand(cityQuery, connection))
@@ -203,7 +234,7 @@ namespace AddressParserAndUpdater
 
                             // לאחר שמצאנו CityID חדש, חפש את ה-StreetID מחדש עם ה-CityID החדש
                             streetQuery = @"SELECT [StreetID]
-                                            FROM [sysStreet]
+                                            FROM [sysStreet] (NOLOCK)
                                             WHERE [CityID] = @CityID AND [StreetName] = @StreetName";
 
                             using (SqlCommand streetCommand2 = new SqlCommand(streetQuery, connection))
@@ -227,7 +258,7 @@ namespace AddressParserAndUpdater
 
         public async Task UpdateAddressesAsync(DataTable addresses)
         {
-            Console.WriteLine("Updating addresses...");
+            BlueConsoleWriteLine("Updating addresses...");
             ResetConsoleColor();
             try
             {
@@ -239,7 +270,9 @@ namespace AddressParserAndUpdater
                     {
                         foreach (DataRow row in addresses.Rows)
                         {
-                            string selectQuery = "SELECT [StreetID], [HouseNum], [CityID] FROM [tblAddress] WHERE [AddressID] = @AddressID";
+                            string selectQuery = @"SELECT [StreetID], [HouseNum], [CityID] 
+                                           FROM [tblAddress] (NOLOCK)
+                                           WHERE [AddressID] = @AddressID";
                             bool hasChanges = false;
 
                             using (SqlCommand selectCommand = new SqlCommand(selectQuery, connection, transaction))
@@ -249,7 +282,7 @@ namespace AddressParserAndUpdater
                                 {
                                     if (await reader.ReadAsync())
                                     {
-                                        /* אם השדות אותו הדבר.. לפני ואחרי. */
+                                        // Check if the fields are different before and after the update
                                         if (!Equals(reader["StreetID"], row["StreetID"]) ||
                                             !Equals(reader["HouseNum"], row["HouseNum"]) ||
                                             !Equals(reader["CityID"], row["CityID"]))
@@ -258,22 +291,18 @@ namespace AddressParserAndUpdater
                                         }
                                         else if (row["StreetID"] == DBNull.Value)
                                         {
-                                            parseFailuresCount++;
                                             parseFailureRemarks[Convert.ToInt32(row["AddressID"])] = row["Remark"].ToString();
-                                            RedConsoleColor();
-                                            Console.WriteLine($"No changes detected for AddressID {row["AddressID"]}, conversion and parsing remark failed! ({row["Remark"]})");
+                                            RedConsoleWriteLine($"No changes detected for AddressID {row["AddressID"]}, conversion and parsing remark failed! ({row["Remark"]})");
                                         }
                                         else
                                         {
-                                            noChangesCount++;
-                                            RedConsoleColor();
-                                            Console.WriteLine($"No changes detected for AddressID {row["AddressID"]}, there is no changes detected!");
+                                            noChangesParseRemarks[Convert.ToInt32(row["AddressID"])] = row["Remark"].ToString();
+                                            RedConsoleWriteLine($"No changes detected for AddressID {row["AddressID"]}, there is no change detected!");
                                         }
                                     }
                                     else
                                     {
-                                        GreenConsoleColor();
-                                        Console.WriteLine($"No data found for AddressID {row["AddressID"]}");
+                                        GreenConsoleWriteLine($"No data found for AddressID {row["AddressID"]}");
                                     }
                                     ResetConsoleColor();
                                 }
@@ -281,42 +310,42 @@ namespace AddressParserAndUpdater
 
                             if (hasChanges)
                             {
-                                string query = "UPDATE [tblAddress] SET [StreetID] = @StreetID, [HouseNum] = @HouseNum, [CityID] = @CityID WHERE [AddressID] = @AddressID";
-                                using (SqlCommand command = new SqlCommand(query, connection, transaction))
-                                {
-                                    command.Parameters.AddWithValue("@StreetID", row["StreetID"] ?? (object)DBNull.Value);
-                                    command.Parameters.AddWithValue("@HouseNum", row["HouseNum"] ?? (object)DBNull.Value);
-                                    command.Parameters.AddWithValue("@CityID", row["CityID"] ?? (object)DBNull.Value);
-                                    command.Parameters.AddWithValue("@AddressID", row["AddressID"]);
+                                string updateQuery = @"UPDATE [tblAddress]
+                                               SET [StreetID] = @StreetID, [HouseNum] = @HouseNum, [CityID] = @CityID
+                                               WHERE [AddressID] = @AddressID";
 
-                                    int rowsAffected = await command.ExecuteNonQueryAsync();
-                                    successfulUpdatesCount++;
-                                    GreenConsoleColor();
-                                    Console.WriteLine($"Updated AddressID {row["AddressID"]}: {rowsAffected} rows affected.");
-                                    ResetConsoleColor();
+                                using (SqlCommand updateCommand = new SqlCommand(updateQuery, connection, transaction))
+                                {
+                                    updateCommand.Parameters.AddWithValue("@StreetID", row["StreetID"]);
+                                    updateCommand.Parameters.AddWithValue("@HouseNum", row["HouseNum"]);
+                                    updateCommand.Parameters.AddWithValue("@CityID", row["CityID"]);
+                                    updateCommand.Parameters.AddWithValue("@AddressID", row["AddressID"]);
+
+                                    await updateCommand.ExecuteNonQueryAsync();
+                                    successfulParseRemarks[Convert.ToInt32(row["AddressID"])] = row["Remark"].ToString();
+                                    GreenConsoleWriteLine($"Successfully updated AddressID {row["AddressID"]}");
                                 }
                             }
                         }
+
                         transaction.Commit();
                     }
                 }
             }
             catch (Exception ex)
             {
-                // טיפול בשגיאות
-                RedConsoleColor();
-                Console.WriteLine($"An error occurred: {ex.Message}");
-                ResetConsoleColor();
+                RedConsoleWriteLine($"Error occurred: {ex.Message}");
             }
         }
 
-        public void PrintSummery()
+
+        public void PrintSummary()
         {
-            Console.WriteLine();
-            BlueConsoleColor();
-            Console.WriteLine($"Total successful updates: {successfulUpdatesCount}.");
-            Console.WriteLine($"Total addresses with no changes detected: {noChangesCount}.");
-            Console.WriteLine($"Total addresses where conversion and parsing failed: {parseFailuresCount}.");
+            BlueConsoleWriteLine("Processing Summary:");
+            GreenConsoleWriteLine($"ParseFailureCount: {ParseRemarks["ParseFailureRemarks"].Count}");
+            GreenConsoleWriteLine($"NoChangesCount: {ParseRemarks["NoChangesParseRemarks"].Count}");
+            GreenConsoleWriteLine($"SuccessfulParseCount: {ParseRemarks["SuccessfulParseRemarks"].Count}");
+            GreenConsoleWriteLine($"TotalCount: {ParseRemarks["ParseFailureRemarks"].Count + ParseRemarks["NoChangesParseRemarks"].Count + ParseRemarks["SuccessfulParseRemarks"].Count}");
 
             ExportParseSummary();
         }
@@ -339,20 +368,28 @@ namespace AddressParserAndUpdater
                 // יצירת נתיב קובץ עם תאריך ושעה נוכחיים
                 string filePath = GetFilePathWithDate(directory, baseFilePath);
 
+
+                // הוספת סיכום למילון ParseRemarks
+                var summary = new Dictionary<object, int>
+                {
+                     { "ParseFailureCount", ParseRemarks["ParseFailureRemarks"].Count },
+                     { "NoChangesCount", ParseRemarks["NoChangesParseRemarks"].Count },
+                     { "SuccessfulParseCount", ParseRemarks["SuccessfulParseRemarks"].Count },
+                     { "TotalCount", ParseRemarks["ParseFailureRemarks"].Count + ParseRemarks["NoChangesParseRemarks"].Count + ParseRemarks["SuccessfulParseRemarks"].Count }
+                };
+
+                ParseRemarks.Add("Summary", summary.ToDictionary(kvp => kvp.Key, kvp => kvp.Value.ToString()));
+
                 // המרת ה- Dictionary ל- JSON וכתיבתו לקובץ
-                string json = JsonSerializer.Serialize(parseFailureRemarks, new JsonSerializerOptions { WriteIndented = true });
+                string json = JsonSerializer.Serialize(ParseRemarks, new JsonSerializerOptions { WriteIndented = true });
                 File.WriteAllText(filePath, json);
 
-                YellowConsoleColor();
-                Console.WriteLine($"Summary of Parsing Failures exported to: {filePath}");
-                ResetConsoleColor();  
+                YellowConsoleWriteLine($"Summary of Parsing Failures exported to: {filePath}");
             }
             catch (Exception ex)
             {
-                RedConsoleColor();
-                Console.WriteLine("Export failed!");
-                Console.WriteLine($"Error: {ex.Message}");
-                ResetConsoleColor();
+                RedConsoleWriteLine("Export failed!");
+                RedConsoleWriteLine($"Error: {ex.Message}");
             }
         }
 
@@ -386,26 +423,34 @@ namespace AddressParserAndUpdater
             return exportDirectory;
         }
 
-        public void GreenConsoleColor()
+        public void GreenConsoleWriteLine(string msg)
         {
             Console.ForegroundColor = ConsoleColor.Green;
+            Console.WriteLine(msg);
+            ResetConsoleColor();
         }
-        public void RedConsoleColor()
+        public void RedConsoleWriteLine(string msg)
         {
             Console.ForegroundColor = ConsoleColor.Red;
+            Console.WriteLine(msg);
+            ResetConsoleColor();
         }
-        public void BlueConsoleColor()
+        public void BlueConsoleWriteLine(string msg)
         {
             Console.ForegroundColor = ConsoleColor.Blue;
+            Console.WriteLine(msg);
+            ResetConsoleColor();
         }
-        public void YellowConsoleColor()
+        public void YellowConsoleWriteLine(string msg)
         {
             Console.ForegroundColor = ConsoleColor.Yellow;
+            Console.WriteLine(msg);
+            ResetConsoleColor();
         }
         public void ResetConsoleColor()
         {
             Console.ResetColor();
         }
+
     }
 }
-
