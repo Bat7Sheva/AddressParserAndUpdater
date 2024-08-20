@@ -5,8 +5,10 @@ using System.Data.SqlClient;
 using System.Linq;
 using System.Net;
 using System.Text;
+using System.Text.Encodings.Web;
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using System.Text.Unicode;
 using System.Threading.Tasks;
 
 namespace AddressParserAndUpdater
@@ -82,8 +84,15 @@ namespace AddressParserAndUpdater
             }
         }
 
+        DateTime startTime;
+        DateTime endTime;
+        TimeSpan duration;
         public async Task ProcessAddressesInBatchesAsync()
         {
+            // הקלטת זמן התחלה
+            startTime = DateTime.Now;
+            Console.WriteLine($"Start Time: {startTime:HH:mm:ss}");
+
             Console.WriteLine("Processing addresses in batches...");
 
             int startIndex = 0;
@@ -93,19 +102,35 @@ namespace AddressParserAndUpdater
 
             do
             {
-                addresses = await GetAddressesAsync(startIndex, BatchSize);
+                addresses = await GetAddressesAsync(startIndex, 20);
+                //addresses = await GetAddressesAsync(startIndex, BatchSize);
 
-                foreach (DataRow row in addresses.Rows)
-                {
-                    string rawAddress = row["Remark"].ToString();
-                    await ProcessAddressAsync(rawAddress, row);
-                }
+
+                // עיבוד כתובות במקביל
+                var processTasks = addresses.AsEnumerable().Select(row => ProcessAddressAsync(row["Remark"].ToString(), row)).ToArray();
+                await Task.WhenAll(processTasks);
+
+                // foreach (DataRow row in addresses.Rows)
+                // {
+                //     string rawAddress = row["Remark"].ToString();
+                //     await ProcessAddressAsync(rawAddress, row);
+                // }
 
                 await UpdateAddressesAsync(addresses);
 
                 startIndex += BatchSize;
 
-            } while (addresses.Rows.Count > 0); // ממשיך לעבד עד שאין עוד כתובות לעבד
+            } while (false); // ממשיך לעבד עד שאין עוד כתובות לעבד
+            //} while (addresses.Rows.Count > 0); // ממשיך לעבד עד שאין עוד כתובות לעבד
+
+            // הקלטת זמן סיום
+            endTime = DateTime.Now;
+            Console.WriteLine($"End Time: {endTime:HH:mm:ss}");
+
+            // חישוב הזמן שחלף
+            duration = endTime - startTime;
+            // הצגת הזמן שחלף בפורמט של שעות, דקות ושניות
+            Console.WriteLine($"Duration: {duration.Hours} hours, {duration.Minutes} minutes, {duration.Seconds} seconds");
 
             PrintSummary();
         }
@@ -350,12 +375,8 @@ namespace AddressParserAndUpdater
             ExportParseSummary();
         }
 
-        // פונקציה עיקרית לייצוא סיכום וכתיבה לקובץ
         public void ExportParseSummary()
         {
-            Console.WriteLine();
-            // הדפסת סיכום ל-Log
-
             try
             {
                 // יצירת תיקיה לייצוא אם לא קיימת
@@ -368,21 +389,32 @@ namespace AddressParserAndUpdater
                 // יצירת נתיב קובץ עם תאריך ושעה נוכחיים
                 string filePath = GetFilePathWithDate(directory, baseFilePath);
 
-
                 // הוספת סיכום למילון ParseRemarks
                 var summary = new Dictionary<object, int>
                 {
-                     { "ParseFailureCount", ParseRemarks["ParseFailureRemarks"].Count },
-                     { "NoChangesCount", ParseRemarks["NoChangesParseRemarks"].Count },
-                     { "SuccessfulParseCount", ParseRemarks["SuccessfulParseRemarks"].Count },
-                     { "TotalCount", ParseRemarks["ParseFailureRemarks"].Count + ParseRemarks["NoChangesParseRemarks"].Count + ParseRemarks["SuccessfulParseRemarks"].Count }
+                    { "ParseFailureCount", ParseRemarks.ContainsKey("ParseFailureRemarks") ? ParseRemarks["ParseFailureRemarks"].Count : 0 },
+                    { "NoChangesCount", ParseRemarks.ContainsKey("NoChangesParseRemarks") ? ParseRemarks["NoChangesParseRemarks"].Count : 0 },
+                    { "SuccessfulParseCount", ParseRemarks.ContainsKey("SuccessfulParseRemarks") ? ParseRemarks["SuccessfulParseRemarks"].Count : 0 },
+                    { "TotalCount", (ParseRemarks.ContainsKey("ParseFailureRemarks") ? ParseRemarks["ParseFailureRemarks"].Count : 0) +
+                                      (ParseRemarks.ContainsKey("NoChangesParseRemarks") ? ParseRemarks["NoChangesParseRemarks"].Count : 0) +
+                                      (ParseRemarks.ContainsKey("SuccessfulParseRemarks") ? ParseRemarks["SuccessfulParseRemarks"].Count : 0) },
+                    { "DurationMinutes", (int)duration.TotalMinutes }
                 };
 
                 ParseRemarks.Add("Summary", summary.ToDictionary(kvp => kvp.Key, kvp => kvp.Value.ToString()));
 
+                PrintDictionary(ParseRemarks);
+
                 // המרת ה- Dictionary ל- JSON וכתיבתו לקובץ
-                string json = JsonSerializer.Serialize(ParseRemarks, new JsonSerializerOptions { WriteIndented = true });
+                var options = new JsonSerializerOptions
+                {
+                    WriteIndented = true,
+                    Encoder = JavaScriptEncoder.Create(UnicodeRanges.All)
+                };
+
+                string json = JsonSerializer.Serialize(ParseRemarks, options);
                 File.WriteAllText(filePath, json);
+                Console.WriteLine(json); // הדפס לקונסול לבדוק את התוכן
 
                 YellowConsoleWriteLine($"Summary of Parsing Failures exported to: {filePath}");
             }
@@ -390,6 +422,19 @@ namespace AddressParserAndUpdater
             {
                 RedConsoleWriteLine("Export failed!");
                 RedConsoleWriteLine($"Error: {ex.Message}");
+            }
+        }
+
+        static void PrintDictionary(Dictionary<string, Dictionary<object, string>> dictionary)
+        {
+            foreach (var outerPair in dictionary)
+            {
+                Console.WriteLine($"{outerPair.Key} ({outerPair.Value.Count})");
+                foreach (var innerPair in outerPair.Value)
+                {
+                    Console.WriteLine($"\tAddresID: {innerPair.Key}, Value: {innerPair.Value}");
+                }
+                Console.WriteLine();
             }
         }
 
